@@ -14,6 +14,8 @@ const ALLOWED_TYPES = new Set([
   'abilityHealing',
   'abilityCast',
   'summaryPing',
+  'partyTick',
+  'teamSnapshot',
 ]);
 
 // Room keys arriving as query params are already hashed by the userscript,
@@ -66,12 +68,31 @@ server.on('upgrade', (req, socket, head) => {
 
 // ── Connection handling ──────────────────────────────────────────────────────
 
+function broadcastPeerCount(room) {
+  const roomPeers = rooms.get(room);
+  if (!roomPeers) return;
+
+  const msg = JSON.stringify({
+    type: 'peerCount',
+    connected: roomPeers.size,
+    peerCount: roomPeers.size,
+    ts: Date.now(),
+  });
+
+  for (const peer of roomPeers) {
+    if (peer.readyState === peer.OPEN) {
+      peer.send(msg);
+    }
+  }
+}
+
 wss.on('connection', (ws) => {
   const { room, clientId } = ws;
 
   if (!rooms.has(room)) rooms.set(room, new Set());
   const peers = rooms.get(room);
   peers.add(ws);
+  broadcastPeerCount(room);
 
   ws.send(JSON.stringify({
     type: 'relayReady',
@@ -112,6 +133,10 @@ wss.on('connection', (ws) => {
 
     if (!msg || typeof msg.type !== 'string' || !ALLOWED_TYPES.has(msg.type)) return;
 
+    // weaponSkill is local-player-only; strip it before relaying so the
+    // receiving client doesn't apply it to the wrong player.
+    if (msg.type === 'partyTick') delete msg.weaponSkill;
+
     const outbound = JSON.stringify({
       ...msg,
       senderClientId: clientId,
@@ -132,7 +157,12 @@ wss.on('connection', (ws) => {
     const roomPeers = rooms.get(room);
     if (roomPeers) {
       roomPeers.delete(ws);
-      if (roomPeers.size === 0) rooms.delete(room);
+
+      if (roomPeers.size === 0) {
+        rooms.delete(room);
+      } else {
+        broadcastPeerCount(room);
+      }
     }
   });
 
